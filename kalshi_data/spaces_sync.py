@@ -30,19 +30,32 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOCAL_ROOT = os.path.join(SCRIPT_DIR, "spaces")
 
 
+def _parse_env_file(path):
+    """Minimal KEY=VALUE parser so this works without python-dotenv installed.
+    Secrets routinely contain '=' and '/', so split on the first '=' only and
+    don't try to be clever beyond stripping optional surrounding quotes."""
+    values = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
+            if val:
+                values[key.strip()] = val
+    return values
+
+
 def load_env():
     """Read .env (repo root or kalshi_data/) without overriding real env vars."""
-    try:
-        from dotenv import dotenv_values
-    except ImportError:
-        dotenv_values = None
-
     values = {}
-    if dotenv_values:
-        for candidate in (os.path.join(SCRIPT_DIR, ".env"),
-                          os.path.join(os.path.dirname(SCRIPT_DIR), ".env")):
-            if os.path.exists(candidate):
-                values.update({k: v for k, v in dotenv_values(candidate).items() if v})
+    for candidate in (os.path.join(SCRIPT_DIR, ".env"),
+                      os.path.join(os.path.dirname(SCRIPT_DIR), ".env")):
+        if os.path.exists(candidate):
+            values.update(_parse_env_file(candidate))
     cfg = {}
     for key in ("SPACES_KEY", "SPACES_SECRET", "SPACES_REGION", "SPACES_BUCKET"):
         cfg[key] = os.environ.get(key) or values.get(key)

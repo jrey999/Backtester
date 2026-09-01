@@ -56,9 +56,27 @@ MAX_SPREAD_CENTS = 10
 
 
 def get(path, **params):
-    resp = requests.get(f"{BASE_URL}{path}", params=params, timeout=20)
-    resp.raise_for_status()
-    return resp.json()
+    """GET with backoff. Kalshi rate-limits bulk pulls with 429s, and long
+    background runs also hit transient connection failures, so retry both
+    rather than losing an entire multi-hour backfill to one blip."""
+    delay = 1.0
+    last_err = None
+    for attempt in range(6):
+        try:
+            resp = requests.get(f"{BASE_URL}{path}", params=params, timeout=30)
+            if resp.status_code == 429:
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+    if last_err:
+        raise last_err
+    raise RuntimeError(f"Gave up after repeated 429s: {path}")
 
 
 def get_all_trades(ticker):

@@ -15,6 +15,7 @@ Safe to re-run: pulls are idempotent (see kalshi_db.py), so re-running
 mid-window just refreshes prices/adds new trades for games still active.
 """
 import argparse
+import os
 import re
 import sys
 import time
@@ -47,7 +48,10 @@ def main():
     parser.add_argument("--start", help="YYYY-MM-DD, default today (UTC)")
     parser.add_argument("--end", help="YYYY-MM-DD, default start + --days")
     parser.add_argument("--db", default=kalshi_db.DEFAULT_DB_PATH)
-    parser.add_argument("--sleep", type=float, default=0.15, help="Seconds to sleep between games")
+    parser.add_argument("--sleep", type=float, default=0.4, help="Seconds to sleep between games")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="Skip events already stored with settled results -- lets a killed "
+                             "backfill resume instead of re-pulling completed games")
     parser.add_argument("--write-files", action="store_true", help="Also write raw.json/csvs per game (default: DB only)")
     args = parser.parse_args()
 
@@ -63,7 +67,26 @@ def main():
         if d and start <= d <= end:
             matched.append((d, e["event_ticker"], e.get("title", "")))
     matched.sort()
-    print(f"{len(matched)} events between {start} and {end}\n")
+    print(f"{len(matched)} events between {start} and {end}")
+
+    if args.skip_existing:
+        import sqlite3
+        done = set()
+        if os.path.exists(args.db):
+            conn = sqlite3.connect(args.db)
+            # "complete" = every market for the event already carries a settled
+            # result, so in-flight/unsettled games still get re-pulled for updates
+            done = {row[0] for row in conn.execute("""
+                SELECT event_ticker FROM markets
+                GROUP BY event_ticker
+                HAVING SUM(CASE WHEN result IN ('yes','no') THEN 1 ELSE 0 END) = COUNT(*)
+                   AND COUNT(*) > 0
+            """)}
+            conn.close()
+        before = len(matched)
+        matched = [m for m in matched if m[1] not in done]
+        print(f"Skipping {before - len(matched)} already-settled events; {len(matched)} to pull")
+    print()
 
     ok, failed, total_new_trades = 0, [], 0
     t0 = time.time()
@@ -71,7 +94,6 @@ def main():
         try:
             raw = pull_event(ticker, args.series)
             if args.write_files:
-                import os
                 out_dir = f"{SCRIPT_DIR}/reports/{ticker}"
                 os.makedirs(out_dir, exist_ok=True)
                 write_raw_and_csvs(raw, out_dir)
