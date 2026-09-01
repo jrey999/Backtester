@@ -75,6 +75,48 @@ def get_all_trades(ticker):
     return trades
 
 
+def get_all_historical_trades(ticker):
+    trades, cursor = [], None
+    while True:
+        params = {"ticker": ticker, "limit": 1000}
+        if cursor:
+            params["cursor"] = cursor
+        data = get("/historical/trades", **params)
+        trades.extend(data.get("trades", []))
+        cursor = data.get("cursor")
+        if not cursor:
+            break
+    return trades
+
+
+def _normalize_historical_candle(c):
+    """Historical candlesticks use price.close/open/... (no _dollars suffix)
+    and volume/open_interest (no _fp suffix), unlike the live endpoint's
+    price.close_dollars / volume_fp. Reshape to the live schema so every
+    downstream consumer (store_raw, liquidity_filter, the chart template)
+    can stay written against one shape regardless of source."""
+    def dollars(d):
+        # Drop None values so an all-null price dict comes out {} (falsy),
+        # matching the live schema's convention of omitting the key entirely
+        # when nothing traded that hour -- downstream code branches on that.
+        return {f"{k}_dollars": v for k, v in (d or {}).items() if v is not None}
+    return {
+        "end_period_ts": c["end_period_ts"],
+        "price": dollars(c.get("price")),
+        "yes_bid": dollars(c.get("yes_bid")),
+        "yes_ask": dollars(c.get("yes_ask")),
+        "volume_fp": c.get("volume", 0),
+        "open_interest_fp": c.get("open_interest", 0),
+    }
+
+
+def get_historical_candlesticks(ticker, start_ts, end_ts, period_interval=60):
+    data = get(f"/historical/markets/{ticker}/candlesticks",
+               start_ts=start_ts, end_ts=end_ts, period_interval=period_interval)
+    candles = [_normalize_historical_candle(c) for c in data.get("candlesticks", [])]
+    return {"candlesticks": candles}
+
+
 def get_all_events(series_ticker):
     events, cursor = [], None
     while True:
@@ -127,7 +169,12 @@ def resolve_event_ticker(args):
 def pull_event(event_ticker, series_ticker):
     event_detail = get(f"/events/{event_ticker}", with_nested_markets="true")
     event = event_detail["event"]
-    markets_meta = event["markets"]
+    markets_meta = event.get("markets") or []
+    if not markets_meta:
+        # Settled/archived events don't come back with nested markets on the
+        # live endpoint -- their market objects (and all trade/candle data)
+        # have been moved to Kalshi's historical archive. Same host, /historical/*.
+        markets_meta = get("/historical/markets", event_ticker=event_ticker).get("markets", [])
     if len(markets_meta) != 2:
         print(f"Warning: expected 2 outcome markets, found {len(markets_meta)}. "
               "Top-10 'direction' logic assumes exactly 2.", file=sys.stderr)
@@ -139,15 +186,29 @@ def pull_event(event_ticker, series_ticker):
     for mm in markets_meta:
         ticker = mm["ticker"]
         label = mm.get("yes_sub_title") or mm.get("title") or ticker
-        trades = get_all_trades(ticker)
-        candles = get(
-            f"/series/{series_ticker}/markets/{ticker}/candlesticks",
-            start_ts=start_ts, end_ts=now_ts, period_interval=60,
-        )
-        orderbook = get(f"/markets/{ticker}/orderbook", depth=10)
+        is_historical = mm.get("status") in ("finalized", "settled")
+
+        if is_historical:
+            trades = get_all_historical_trades(ticker)
+            open_ts = int(datetime.fromisoformat(mm["open_time"].replace("Z", "+00:00")).timestamp())
+            close_ts = int(datetime.fromisoformat(mm["close_time"].replace("Z", "+00:00")).timestamp())
+            candles = get_historical_candlesticks(ticker, open_ts, close_ts)
+            orderbook = None  # no live book for a settled market
+        else:
+            trades = get_all_trades(ticker)
+            candles = get(
+                f"/series/{series_ticker}/markets/{ticker}/candlesticks",
+                start_ts=start_ts, end_ts=now_ts, period_interval=60,
+            )
+            orderbook = get(f"/markets/{ticker}/orderbook", depth=10)
+
         markets[ticker] = {
             "ticker": ticker,
             "label": label,
+            "status": mm.get("status"),
+            "result": mm.get("result"),
+            "open_time": mm.get("open_time", ""),
+            "close_time": mm.get("close_time", ""),
             "trades": {"trades": trades},
             "candlesticks": candles,
             "orderbook_snapshot": orderbook,
@@ -387,8 +448,8 @@ def render_html(raw, market_tickers, filtered_by_market, kpis, top10, out_dir):
         "top10": top10,
     }
 
-    open_time = event.get("markets", [{}])[0].get("open_time", "")
-    close_time = event.get("markets", [{}])[0].get("close_time", "")
+    open_time = raw["markets"][market_tickers[0]].get("open_time", "")
+    close_time = raw["markets"][market_tickers[0]].get("close_time", "")
 
     with open(f"{SCRIPT_DIR}/report_template.html") as f:
         tmpl = f.read()

@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS markets (
     label             TEXT,
     open_time         TEXT,
     close_time        TEXT,
+    status            TEXT,
+    result            TEXT,
     last_pulled_at    TEXT
 );
 
@@ -80,10 +82,21 @@ CREATE TABLE IF NOT EXISTS orderbook_snapshots (
 """
 
 
+def _migrate(conn):
+    """Add columns introduced after the table already existed on disk --
+    SQLite's CREATE TABLE IF NOT EXISTS won't add them to an existing table."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(markets)")}
+    for col in ("status", "result"):
+        if col not in existing:
+            conn.execute(f"ALTER TABLE markets ADD COLUMN {col} TEXT")
+
+
 def connect(db_path=DEFAULT_DB_PATH):
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
+    conn.commit()
     return conn
 
 
@@ -110,13 +123,14 @@ def store_raw(raw, db_path=DEFAULT_DB_PATH):
 
         n_trades = n_candles = n_books = 0
         for ticker, m in raw["markets"].items():
-            mm = next((x for x in event.get("markets", []) if x["ticker"] == ticker), {})
             conn.execute("""
-                INSERT INTO markets (market_ticker, event_ticker, label, open_time, close_time, last_pulled_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO markets (market_ticker, event_ticker, label, open_time, close_time, status, result, last_pulled_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(market_ticker) DO UPDATE SET
-                    label=excluded.label, last_pulled_at=excluded.last_pulled_at
-            """, (ticker, event_ticker, m["label"], mm.get("open_time", ""), mm.get("close_time", ""), now))
+                    label=excluded.label, status=excluded.status, result=excluded.result,
+                    last_pulled_at=excluded.last_pulled_at
+            """, (ticker, event_ticker, m["label"], m.get("open_time", ""), m.get("close_time", ""),
+                  m.get("status"), m.get("result"), now))
 
             for t in m["trades"]["trades"]:
                 conn.execute("""
@@ -153,11 +167,12 @@ def store_raw(raw, db_path=DEFAULT_DB_PATH):
                 ))
                 n_candles += 1
 
-            conn.execute("""
-                INSERT OR IGNORE INTO orderbook_snapshots (market_ticker, pulled_at, raw_json)
-                VALUES (?, ?, ?)
-            """, (ticker, raw["pulled_at_utc"], json.dumps(m["orderbook_snapshot"])))
-            n_books += conn.execute("SELECT changes()").fetchone()[0]
+            if m.get("orderbook_snapshot") is not None:
+                conn.execute("""
+                    INSERT OR IGNORE INTO orderbook_snapshots (market_ticker, pulled_at, raw_json)
+                    VALUES (?, ?, ?)
+                """, (ticker, raw["pulled_at_utc"], json.dumps(m["orderbook_snapshot"])))
+                n_books += conn.execute("SELECT changes()").fetchone()[0]
 
     conn.close()
     return {"new_trades": n_trades, "candlestick_rows_upserted": n_candles, "new_orderbook_snapshots": n_books}
