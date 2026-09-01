@@ -13,6 +13,10 @@ Usage:
   python3 kalshi_game_report.py --search "Southern Illinois Samford"
   python3 kalshi_game_report.py --search "Alabama Auburn" --series KXNCAAFGAME
 
+Also upserts everything pulled into a persistent SQLite database
+(kalshi_data/kalshi_market_data.db by default -- see kalshi_db.py) that
+accumulates across games and re-pulls; pass --no-db to skip that.
+
 Output (written to kalshi_data/reports/<event_ticker>/):
   raw.json                     -- full raw API responses, all markets
   trades.csv                   -- every individual trade, all markets
@@ -32,6 +36,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import requests
+
+import kalshi_db
 
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -418,6 +424,8 @@ def main():
     parser.add_argument("--search", help="Search terms to find the event, e.g. 'Southern Illinois Samford'")
     parser.add_argument("--series", default=DEFAULT_SERIES, help=f"Series ticker to search within (default {DEFAULT_SERIES})")
     parser.add_argument("--out-dir", default=None, help="Output directory (default kalshi_data/reports/<event_ticker>)")
+    parser.add_argument("--db", default=kalshi_db.DEFAULT_DB_PATH, help="SQLite DB path to persist into (default kalshi_data/kalshi_market_data.db)")
+    parser.add_argument("--no-db", action="store_true", help="Skip writing to the persistent SQLite DB")
     args = parser.parse_args()
 
     event_ticker = resolve_event_ticker(args)
@@ -429,6 +437,13 @@ def main():
     market_tickers = list(raw["markets"].keys())
 
     write_raw_and_csvs(raw, out_dir)
+
+    if not args.no_db:
+        db_stats = kalshi_db.store_raw(raw, args.db)
+        print(f"Persisted to {args.db}: +{db_stats['new_trades']} new trades, "
+              f"{db_stats['candlestick_rows_upserted']} candlestick rows upserted, "
+              f"+{db_stats['new_orderbook_snapshots']} orderbook snapshots")
+
     filtered_by_market = liquidity_filter(raw, out_dir)
     kpis = compute_kpis(raw, market_tickers)
     top10 = compute_top10(raw, market_tickers, {t: raw["markets"][t]["label"] for t in market_tickers})
