@@ -32,3 +32,6 @@ venv.bak/
 .vscode/tasks.json
 .vscode/launch.json
 .vscode/extensions.json
+
+# Kalshi per-game pulls (regenerate with kalshi_data/kalshi_game_report.py)
+kalshi_data/reports/
