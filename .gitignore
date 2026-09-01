@@ -36,7 +36,9 @@ venv.bak/
 # Kalshi per-game pulls (regenerate with kalshi_data/kalshi_game_report.py)
 kalshi_data/reports/
 
-# Historical season backfill: too large for git. System of record is the
-# Spaces bucket (kalshi_data/spaces_sync.py); these are local working copies.
-kalshi_data/kalshi_historical.db
+# Data lives in the Spaces bucket, not git. Everything below is a local
+# working copy, regenerable via bulk_pull.py + spaces_export.py.
+kalshi_data/*.db
 kalshi_data/spaces/
+kalshi_data/siu_samford_*.json
+kalshi_data/siu_samford_*.csv
