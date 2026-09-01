@@ -39,6 +39,10 @@ kalshi_data/reports/
 # Data lives in the Spaces bucket, not git. Everything below is a local
 # working copy, regenerable via bulk_pull.py + spaces_export.py.
 kalshi_data/*.db
+# SQLite sidecars: transient, and present whenever a pull is mid-write
+kalshi_data/*.db-journal
+kalshi_data/*.db-wal
+kalshi_data/*.db-shm
 kalshi_data/spaces/
 kalshi_data/siu_samford_*.json
 kalshi_data/siu_samford_*.csv
